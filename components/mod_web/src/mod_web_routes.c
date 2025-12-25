@@ -184,6 +184,64 @@ esp_err_t mod_web_register_routes(httpd_handle_t server)
         return ret;
     }
 
+    // ========== File API Handlers ==========
+    
+    // GET /api/file/export
+    httpd_uri_t uri_file_export = {
+        .uri = "/api/file/export",
+        .method = HTTP_GET,
+        .handler = mod_web_api_file_export,
+        .user_ctx = NULL
+    };
+    ret = httpd_register_uri_handler(server, &uri_file_export);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register /api/file/export handler");
+        return ret;
+    }
+
+    // POST /api/file/import
+    httpd_uri_t uri_file_import = {
+        .uri = "/api/file/import",
+        .method = HTTP_POST,
+        .handler = mod_web_api_file_import,
+        .user_ctx = NULL
+    };
+    ret = httpd_register_uri_handler(server, &uri_file_import);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register /api/file/import handler");
+        return ret;
+    }
+
+    // ========== OTA Handler ==========
+    
+    // POST /api/sys/ota
+    httpd_uri_t uri_sys_ota = {
+        .uri = "/api/sys/ota",
+        .method = HTTP_POST,
+        .handler = mod_web_api_system_ota,
+        .user_ctx = NULL
+    };
+    ret = httpd_register_uri_handler(server, &uri_sys_ota);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register /api/sys/ota handler");
+        return ret;
+    }
+
+    // ========== Health/Telemetry Handler ==========
+    
+    // GET /api/sys/health
+    httpd_uri_t uri_sys_health = {
+        .uri = "/api/sys/health",
+        .method = HTTP_GET,
+        .handler = mod_web_api_system_health,
+        .user_ctx = NULL
+    };
+    ret = httpd_register_uri_handler(server, &uri_sys_health);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register /api/sys/health handler");
+        return ret;
+    }
+
     // ========== WebSocket Handler ==========
     
     // GET /ws/status -> WebSocket upgrade

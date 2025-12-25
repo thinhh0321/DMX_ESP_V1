@@ -83,6 +83,40 @@ esp_err_t mod_web_api_network_status(httpd_req_t *req);
  */
 esp_err_t mod_web_api_network_config(httpd_req_t *req);
 
+/* ========== File API Handlers ========== */
+
+/**
+ * @brief GET /api/file/export
+ * 
+ * Exports current configuration as JSON file.
+ */
+esp_err_t mod_web_api_file_export(httpd_req_t *req);
+
+/**
+ * @brief POST /api/file/import
+ * 
+ * Imports configuration from JSON file.
+ */
+esp_err_t mod_web_api_file_import(httpd_req_t *req);
+
+/* ========== OTA API Handlers ========== */
+
+/**
+ * @brief POST /api/sys/ota
+ * 
+ * Handles OTA firmware upload.
+ */
+esp_err_t mod_web_api_system_ota(httpd_req_t *req);
+
+/* ========== Health/Telemetry API Handlers ========== */
+
+/**
+ * @brief GET /api/sys/health
+ * 
+ * Returns detailed system health and telemetry data.
+ */
+esp_err_t mod_web_api_system_health(httpd_req_t *req);
+
 #ifdef __cplusplus
 }
 #endif

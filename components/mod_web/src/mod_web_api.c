@@ -11,6 +11,7 @@
 #include "mod_web_error.h"
 #include "sys_mod.h"
 #include "mod_net.h"
+#include "mod_proto.h"
 #include "mod_web_auth.h"
 #include "dmx_types.h"
 #include "esp_log.h"
@@ -25,35 +26,18 @@ static const char *TAG = "MOD_WEB_API";
 /* ========== HELPER FUNCTIONS ========== */
 
 /**
- * @brief Calculate FPS for a DMX port based on recent activity
+ * @brief Get FPS for a DMX port
  * 
- * Provides a simple estimate based on activity timing.
+ * Uses sys_get_port_fps() for accurate FPS calculation.
  */
-static uint16_t calculate_port_fps_estimate(int port_idx)
+static uint16_t get_port_fps(int port_idx)
 {
     if (port_idx < 0 || port_idx >= 4) {
         return 0;
     }
     
-    int64_t last_activity = sys_get_last_activity(port_idx);
-    int64_t now = esp_timer_get_time();
-    
-    // If no activity, return 0
-    if (last_activity == 0) {
-        return 0;
-    }
-    
-    // If activity within last 100ms, estimate based on typical DMX rate
-    int64_t time_since_activity = now - last_activity;
-    if (time_since_activity < 100000) { // 100ms
-        // Active - return typical DMX rate (30-44 fps is common)
-        const sys_config_t *cfg = sys_get_config();
-        if (cfg && cfg->ports[port_idx].enabled) {
-            return 40; // Typical sACN/Art-Net rate
-        }
-    }
-    
-    return 0; // No recent activity
+    // Use the accurate FPS tracker from sys_mod
+    return sys_get_port_fps(port_idx);
 }
 
 /* ========== SYSTEM API HANDLERS ========== */
@@ -304,7 +288,7 @@ esp_err_t mod_web_api_dmx_status(httpd_req_t *req)
         cJSON_AddBoolToObject(port, "enabled", port_cfg.enabled);
 
         // Calculate FPS from activity with improved estimation
-        uint16_t fps = calculate_port_fps_estimate(i);
+        uint16_t fps = get_port_fps(i);
         cJSON_AddNumberToObject(port, "fps", fps);
 
         // Backend type (RMT or UART - simplified)
@@ -547,11 +531,15 @@ esp_err_t mod_web_api_network_config(httpd_req_t *req)
     if (err != ESP_OK) {
         return mod_web_error_send_500(req, "Failed to update network config");
     }
+    
+    // Apply changes to active network interfaces immediately
+    net_reload_config();
 
     // Send success response
     // Per MOD_WEB.md: Response format {"status": "ok"}
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "status", "ok");
+    cJSON_AddStringToObject(root, "message", "Network configuration updated and applied");
 
     esp_err_t resp_ret = mod_web_json_send_response(req, root);
     cJSON_Delete(root);
@@ -559,3 +547,351 @@ esp_err_t mod_web_api_network_config(httpd_req_t *req)
     return resp_ret;
 }
 
+
+/* ========== FILE API HANDLERS ========== */
+
+esp_err_t mod_web_api_file_export(httpd_req_t *req)
+{
+    ESP_LOGD(TAG, "GET /api/file/export");
+
+    // Require auth for sensitive config export
+    if (mod_web_auth_is_enabled()) {
+        if (!mod_web_auth_check_request(req)) {
+            return mod_web_error_send_401(req, "Authentication required");
+        }
+    }
+
+    // Get system configuration
+    const sys_config_t *cfg = sys_get_config();
+    if (cfg == NULL) {
+        return mod_web_error_send_500(req, "Failed to get system config");
+    }
+
+    // Build JSON response with full configuration
+    cJSON *root = cJSON_CreateObject();
+    
+    // Device info
+    cJSON_AddStringToObject(root, "device_label", cfg->device_label);
+    cJSON_AddNumberToObject(root, "led_brightness", cfg->led_brightness);
+    
+    // Network configuration
+    cJSON *net = cJSON_CreateObject();
+    cJSON_AddBoolToObject(net, "dhcp", cfg->net.dhcp);
+    cJSON_AddStringToObject(net, "static_ip", cfg->net.static_ip);
+    cJSON_AddStringToObject(net, "static_netmask", cfg->net.static_netmask);
+    cJSON_AddStringToObject(net, "static_gateway", cfg->net.static_gateway);
+    cJSON_AddStringToObject(net, "wifi_ssid", cfg->net.wifi_ssid);
+    cJSON_AddStringToObject(net, "wifi_psk", cfg->net.wifi_psk);
+    cJSON_AddBoolToObject(net, "wifi_enabled", cfg->net.wifi_enabled);
+    cJSON_AddBoolToObject(net, "eth_enabled", cfg->net.eth_enabled);
+    cJSON_AddItemToObject(root, "network", net);
+    
+    // DMX ports configuration
+    cJSON *ports = cJSON_CreateArray();
+    for (int i = 0; i < 4; i++) {
+        cJSON *port = cJSON_CreateObject();
+        cJSON_AddNumberToObject(port, "index", i);
+        cJSON_AddBoolToObject(port, "enabled", cfg->ports[i].enabled);
+        cJSON_AddNumberToObject(port, "universe", cfg->ports[i].universe);
+        cJSON_AddNumberToObject(port, "protocol", cfg->ports[i].protocol);
+        cJSON_AddNumberToObject(port, "break_us", cfg->ports[i].timing.break_us);
+        cJSON_AddNumberToObject(port, "mab_us", cfg->ports[i].timing.mab_us);
+        cJSON_AddItemToArray(ports, port);
+    }
+    cJSON_AddItemToObject(root, "ports", ports);
+    
+    // Failsafe configuration
+    cJSON *failsafe = cJSON_CreateObject();
+    cJSON_AddNumberToObject(failsafe, "mode", cfg->failsafe.mode);
+    cJSON_AddNumberToObject(failsafe, "timeout_ms", cfg->failsafe.timeout_ms);
+    cJSON_AddItemToObject(root, "failsafe", failsafe);
+
+    // Set headers for file download
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"dmx_config.json\"");
+
+    esp_err_t resp_ret = mod_web_json_send_response(req, root);
+    cJSON_Delete(root);
+
+    return resp_ret;
+}
+
+esp_err_t mod_web_api_file_import(httpd_req_t *req)
+{
+    ESP_LOGD(TAG, "POST /api/file/import");
+
+    // Require auth for sensitive config import
+    if (mod_web_auth_is_enabled()) {
+        if (!mod_web_auth_check_request(req)) {
+            return mod_web_error_send_401(req, "Authentication required");
+        }
+    }
+
+    // Receive JSON body
+    cJSON *json = NULL;
+    esp_err_t ret = mod_web_json_receive_body(req, &json);
+    if (ret != ESP_OK || json == NULL) {
+        return mod_web_error_send_400(req, "Invalid JSON body");
+    }
+
+    // Validate and parse configuration
+    // Device label
+    cJSON *device_label = cJSON_GetObjectItem(json, "device_label");
+    if (device_label && cJSON_IsString(device_label)) {
+        sys_update_device_label(cJSON_GetStringValue(device_label));
+    }
+
+    // LED brightness
+    cJSON *led_brightness = cJSON_GetObjectItem(json, "led_brightness");
+    if (led_brightness && cJSON_IsNumber(led_brightness)) {
+        sys_update_led_brightness((uint8_t)led_brightness->valueint);
+    }
+
+    // Network configuration
+    cJSON *net_obj = cJSON_GetObjectItem(json, "network");
+    if (net_obj && cJSON_IsObject(net_obj)) {
+        net_config_t new_net = {0};
+        
+        cJSON *dhcp = cJSON_GetObjectItem(net_obj, "dhcp");
+        if (dhcp && cJSON_IsBool(dhcp)) {
+            new_net.dhcp = cJSON_IsTrue(dhcp);
+        }
+        
+        cJSON *static_ip = cJSON_GetObjectItem(net_obj, "static_ip");
+        if (static_ip && cJSON_IsString(static_ip)) {
+            strncpy(new_net.static_ip, cJSON_GetStringValue(static_ip), sizeof(new_net.static_ip) - 1);
+            new_net.static_ip[sizeof(new_net.static_ip) - 1] = '\0'; // Ensure null termination
+        }
+        
+        cJSON *static_netmask = cJSON_GetObjectItem(net_obj, "static_netmask");
+        if (static_netmask && cJSON_IsString(static_netmask)) {
+            strncpy(new_net.static_netmask, cJSON_GetStringValue(static_netmask), sizeof(new_net.static_netmask) - 1);
+            new_net.static_netmask[sizeof(new_net.static_netmask) - 1] = '\0';
+        }
+        
+        cJSON *static_gateway = cJSON_GetObjectItem(net_obj, "static_gateway");
+        if (static_gateway && cJSON_IsString(static_gateway)) {
+            strncpy(new_net.static_gateway, cJSON_GetStringValue(static_gateway), sizeof(new_net.static_gateway) - 1);
+            new_net.static_gateway[sizeof(new_net.static_gateway) - 1] = '\0';
+        }
+        
+        cJSON *wifi_ssid = cJSON_GetObjectItem(net_obj, "wifi_ssid");
+        if (wifi_ssid && cJSON_IsString(wifi_ssid)) {
+            strncpy(new_net.wifi_ssid, cJSON_GetStringValue(wifi_ssid), sizeof(new_net.wifi_ssid) - 1);
+            new_net.wifi_ssid[sizeof(new_net.wifi_ssid) - 1] = '\0';
+        }
+        
+        cJSON *wifi_psk = cJSON_GetObjectItem(net_obj, "wifi_psk");
+        if (wifi_psk && cJSON_IsString(wifi_psk)) {
+            strncpy(new_net.wifi_psk, cJSON_GetStringValue(wifi_psk), sizeof(new_net.wifi_psk) - 1);
+            new_net.wifi_psk[sizeof(new_net.wifi_psk) - 1] = '\0';
+        }
+        
+        cJSON *wifi_enabled = cJSON_GetObjectItem(net_obj, "wifi_enabled");
+        if (wifi_enabled && cJSON_IsBool(wifi_enabled)) {
+            new_net.wifi_enabled = cJSON_IsTrue(wifi_enabled);
+        }
+        
+        cJSON *eth_enabled = cJSON_GetObjectItem(net_obj, "eth_enabled");
+        if (eth_enabled && cJSON_IsBool(eth_enabled)) {
+            new_net.eth_enabled = cJSON_IsTrue(eth_enabled);
+        }
+        
+        sys_update_net_cfg(&new_net);
+    }
+
+    // DMX ports configuration
+    cJSON *ports = cJSON_GetObjectItem(json, "ports");
+    if (ports && cJSON_IsArray(ports)) {
+        int port_count = cJSON_GetArraySize(ports);
+        for (int i = 0; i < port_count && i < 4; i++) {
+            cJSON *port_obj = cJSON_GetArrayItem(ports, i);
+            if (!cJSON_IsObject(port_obj)) continue;
+            
+            dmx_port_cfg_t port_cfg = {0};
+            
+            cJSON *enabled = cJSON_GetObjectItem(port_obj, "enabled");
+            if (enabled && cJSON_IsBool(enabled)) {
+                port_cfg.enabled = cJSON_IsTrue(enabled);
+            }
+            
+            cJSON *universe = cJSON_GetObjectItem(port_obj, "universe");
+            if (universe && cJSON_IsNumber(universe)) {
+                port_cfg.universe = (uint16_t)universe->valueint;
+            }
+            
+            cJSON *protocol = cJSON_GetObjectItem(port_obj, "protocol");
+            if (protocol && cJSON_IsNumber(protocol)) {
+                port_cfg.protocol = (uint8_t)protocol->valueint;
+            }
+            
+            cJSON *break_us = cJSON_GetObjectItem(port_obj, "break_us");
+            if (break_us && cJSON_IsNumber(break_us)) {
+                port_cfg.timing.break_us = (uint16_t)break_us->valueint;
+            }
+            
+            cJSON *mab_us = cJSON_GetObjectItem(port_obj, "mab_us");
+            if (mab_us && cJSON_IsNumber(mab_us)) {
+                port_cfg.timing.mab_us = (uint16_t)mab_us->valueint;
+            }
+            
+            // Validate and update
+            esp_err_t err = sys_update_port_cfg(i, &port_cfg);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to update port %d config", i);
+            }
+        }
+    }
+
+    // Failsafe configuration
+    bool failsafe_skipped = false;
+    cJSON *failsafe_obj = cJSON_GetObjectItem(json, "failsafe");
+    if (failsafe_obj && cJSON_IsObject(failsafe_obj)) {
+        // Note: Need to add sys_update_failsafe_cfg function to sys_mod
+        // For now, log that it's not yet implemented
+        ESP_LOGW(TAG, "Failsafe config import not yet implemented in sys_mod");
+        failsafe_skipped = true;
+    }
+
+    cJSON_Delete(json);
+
+    // Force save to NVS
+    sys_save_config_now();
+
+    // Send success response with note about skipped items
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "status", "ok");
+    if (failsafe_skipped) {
+        cJSON_AddStringToObject(root, "warning", "Failsafe configuration was not imported (not yet implemented)");
+    }
+    cJSON_AddStringToObject(root, "message", "Configuration imported successfully");
+
+    esp_err_t resp_ret = mod_web_json_send_response(req, root);
+    cJSON_Delete(root);
+
+    return resp_ret;
+}
+
+/* ========== OTA API HANDLER ========== */
+
+esp_err_t mod_web_api_system_ota(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "POST /api/sys/ota - OTA Update initiated");
+
+    // Check content length
+    size_t content_len = req->content_len;
+    if (content_len == 0) {
+        return mod_web_error_send_400(req, "Empty firmware file");
+    }
+
+    // Note: Full OTA implementation requires esp_ota_* APIs
+    // This is a placeholder that needs proper implementation
+    ESP_LOGW(TAG, "OTA handler is a stub - full implementation needed");
+    
+    // TODO: Implement full OTA logic:
+    // 1. esp_ota_begin() to start OTA partition write
+    // 2. Read chunks from request body and write with esp_ota_write()
+    // 3. esp_ota_end() to finalize
+    // 4. esp_ota_set_boot_partition() to mark new partition
+    // 5. esp_restart() to reboot
+    
+    // Return 501 Not Implemented (more accurate than 500)
+    httpd_resp_set_status(req, "501 Not Implemented");
+    httpd_resp_set_type(req, "application/json");
+    
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "status", "error");
+    cJSON_AddStringToObject(root, "error", "OTA functionality not yet implemented");
+    
+    esp_err_t ret = mod_web_json_send_response(req, root);
+    cJSON_Delete(root);
+    
+    return ret;
+}
+
+/* ========== HEALTH/TELEMETRY API HANDLER ========== */
+
+esp_err_t mod_web_api_system_health(httpd_req_t *req)
+{
+    ESP_LOGD(TAG, "GET /api/sys/health");
+
+    // Get system configuration
+    const sys_config_t *cfg = sys_get_config();
+    if (cfg == NULL) {
+        return mod_web_error_send_500(req, "Failed to get system config");
+    }
+
+    // Get network status
+    net_status_t net_status;
+    net_get_status(&net_status);
+
+    // Calculate uptime
+    int64_t uptime_us = esp_timer_get_time();
+    uint32_t uptime_sec = (uint32_t)(uptime_us / 1000000);
+
+    // Get memory info
+    uint32_t free_heap = esp_get_free_heap_size();
+    uint32_t min_free_heap = esp_get_minimum_free_heap_size();
+
+    // Build JSON response
+    cJSON *root = cJSON_CreateObject();
+
+    // System status
+    cJSON_AddNumberToObject(root, "uptime", uptime_sec);
+    cJSON_AddNumberToObject(root, "free_heap", free_heap);
+    cJSON_AddNumberToObject(root, "min_free_heap", min_free_heap);
+
+    // Network status
+    cJSON *network = cJSON_CreateObject();
+    cJSON_AddBoolToObject(network, "eth_connected", net_status.eth_connected);
+    cJSON_AddBoolToObject(network, "wifi_connected", net_status.wifi_connected);
+    cJSON_AddBoolToObject(network, "has_ip", net_status.has_ip);
+    if (net_status.has_ip) {
+        cJSON_AddStringToObject(network, "ip", net_status.current_ip);
+    }
+    cJSON_AddItemToObject(root, "network", network);
+
+    // DMX port health
+    cJSON *ports = cJSON_CreateArray();
+    for (int i = 0; i < 4; i++) {
+        if (!cfg->ports[i].enabled) continue;
+        
+        cJSON *port = cJSON_CreateObject();
+        cJSON_AddNumberToObject(port, "port", i);
+        cJSON_AddNumberToObject(port, "universe", cfg->ports[i].universe);
+        
+        // Calculate activity status
+        int64_t last_activity = sys_get_last_activity(i);
+        int64_t now = esp_timer_get_time();
+        int64_t time_since_activity = (now - last_activity) / 1000; // Convert to ms
+        
+        cJSON_AddNumberToObject(port, "last_activity_ms", (int)time_since_activity);
+        cJSON_AddBoolToObject(port, "active", time_since_activity < 2000);
+        
+        // FPS estimate
+        uint16_t fps = get_port_fps(i);
+        cJSON_AddNumberToObject(port, "fps", fps);
+        
+        cJSON_AddItemToArray(ports, port);
+    }
+    cJSON_AddItemToObject(root, "ports", ports);
+
+    // Protocol telemetry
+    cJSON *telemetry = cJSON_CreateObject();
+    
+    // Get protocol metrics
+    mod_proto_metrics_t proto_metrics;
+    mod_proto_get_metrics(&proto_metrics);
+    
+    cJSON_AddNumberToObject(telemetry, "malformed_artnet_packets", proto_metrics.malformed_artnet_packets);
+    cJSON_AddNumberToObject(telemetry, "malformed_sacn_packets", proto_metrics.malformed_sacn_packets);
+    cJSON_AddNumberToObject(telemetry, "socket_errors", proto_metrics.socket_errors);
+    cJSON_AddNumberToObject(telemetry, "igmp_failures", proto_metrics.igmp_failures);
+    
+    cJSON_AddItemToObject(root, "telemetry", telemetry);
+
+    esp_err_t resp_ret = mod_web_json_send_response(req, root);
+    cJSON_Delete(root);
+
+    return resp_ret;
+}

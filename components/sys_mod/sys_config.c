@@ -4,6 +4,7 @@
  */
 
 #include "sys_mod.h"
+#include "mod_dmx.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_crc.h"
@@ -118,6 +119,9 @@ esp_err_t sys_update_port_cfg(int port_idx, const dmx_port_cfg_t* new_cfg) {
     esp_timer_handle_t timer = (esp_timer_handle_t)g_sys_state.save_timer;
     esp_timer_stop(timer);
     esp_timer_start_once(timer, 5000000); // 5s in microseconds
+    
+    // Apply timing changes immediately to DMX driver
+    dmx_apply_new_timing(port_idx, &new_cfg->timing);
     
     ESP_LOGI(TAG, "Port %d config updated (Universe=%d, Protocol=%d)", 
              port_idx, new_cfg->universe, new_cfg->protocol);

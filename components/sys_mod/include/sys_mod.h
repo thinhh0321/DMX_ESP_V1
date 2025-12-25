@@ -197,6 +197,16 @@ void sys_notify_activity(int port_idx);
  */
 int64_t sys_get_last_activity(int port_idx);
 
+/**
+ * @brief Get current FPS for a port
+ * 
+ * Calculates FPS based on packet timestamps over sliding window.
+ * 
+ * @param port_idx Port index (0-3)
+ * @return FPS (frames per second), or 0 if insufficient data
+ */
+uint16_t sys_get_port_fps(int port_idx);
+
 /* ========== INTERNAL / Advanced Accessors ==========
  * These helpers are used by initialization and internal modules.
  * Consider them advanced APIs; use sparingly.

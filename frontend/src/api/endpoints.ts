@@ -12,14 +12,15 @@ export const API_ENDPOINTS = {
   SYSTEM_REBOOT: `${API_PREFIX}/sys/reboot`,
   SYSTEM_FACTORY: `${API_PREFIX}/sys/factory`,
   SYSTEM_OTA: `${API_PREFIX}/sys/ota`,
+  SYSTEM_HEALTH: `${API_PREFIX}/sys/health`,
 
   // DMX endpoints
   DMX_STATUS: `${API_PREFIX}/dmx/status`,
   DMX_CONFIG: `${API_PREFIX}/dmx/config`,
 
   // Network endpoints
-  NETWORK_STATUS: `${API_PREFIX}/network/status`,
-  NETWORK_CONFIG: `${API_PREFIX}/network/config`,
+  NETWORK_STATUS: `${API_PREFIX}/net/status`,
+  NETWORK_CONFIG: `${API_PREFIX}/net/config`,
 
   // Auth endpoints
   AUTH_LOGIN: `${API_PREFIX}/auth/login`,
